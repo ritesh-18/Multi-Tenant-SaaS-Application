@@ -1,0 +1,1444 @@
+openapi: 3.0.3
+info:
+  title: Multi-Tenant SaaS API
+  description: |
+    Production-grade multi-tenant SaaS backend API.
+
+    ## Authentication
+    All protected endpoints require a **Bearer JWT token** from Keycloak in the `Authorization` header.
+
+    ## Tenant Context
+    All tenant-scoped endpoints require the **`X-Tenant-Slug`** header (e.g. `demo` or `acme`).
+
+    ## Roles & Permissions
+    | Role | Level | Access |
+    |------|-------|--------|
+    | `SUPER_ADMIN` | 4 | Full system access |
+    | `ADMIN` | 3 | Full tenant access |
+    | `MANAGER` | 2 | Read + user invite |
+    | `USER` | 1 | Read-only |
+  version: 1.0.0
+  contact:
+    name: SaaS API Support
+    email: support@yoursaas.com
+
+servers:
+  - url: http://localhost:5000/api
+    description: Local development
+  - url: http://localhost/api
+    description: Docker (via nginx)
+
+tags:
+  - name: Health
+    description: Health check
+  - name: Auth
+    description: Authentication via Keycloak (OAuth2 + password)
+  - name: Tenants
+    description: Tenant management (multi-tenancy core)
+  - name: Users
+    description: User management, invitations, notifications
+  - name: Subscriptions
+    description: Subscription plans and upgrades
+  - name: Feature Flags
+    description: Dynamic per-tenant feature toggles
+  - name: Analytics
+    description: Tenant-level usage metrics and charts
+  - name: Audit Logs
+    description: Immutable user activity trail
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    TenantSlug:
+      name: X-Tenant-Slug
+      in: header
+      required: true
+      schema:
+        type: string
+        example: demo
+      description: Tenant identifier slug
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+
+  schemas:
+    # ── Shared ────────────────────────────────────────────────────────
+    ApiSuccess:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: true
+        message:
+          type: string
+          example: Success
+        data:
+          type: object
+
+    ApiError:
+      type: object
+      properties:
+        success:
+          type: boolean
+          example: false
+        message:
+          type: string
+          example: Something went wrong
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              field:
+                type: string
+              message:
+                type: string
+
+    PaginatedMeta:
+      type: object
+      properties:
+        total:
+          type: integer
+          example: 42
+        page:
+          type: integer
+          example: 1
+        limit:
+          type: integer
+          example: 20
+        totalPages:
+          type: integer
+          example: 3
+
+    # ── Tenant ────────────────────────────────────────────────────────
+    Tenant:
+      type: object
+      properties:
+        id:
+          type: string
+          example: abc123def456
+        name:
+          type: string
+          example: Acme Corp
+        slug:
+          type: string
+          example: acme
+        domain:
+          type: string
+          nullable: true
+          example: acme.yoursaas.com
+        logo_url:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [ACTIVE, SUSPENDED, DELETED]
+          example: ACTIVE
+        plan:
+          type: string
+          enum: [FREE, PRO, ENTERPRISE]
+          example: PRO
+        max_users:
+          type: integer
+          example: 50
+        max_api_calls:
+          type: integer
+          example: 50000
+        user_count:
+          type: integer
+          example: 12
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    CreateTenantRequest:
+      type: object
+      required: [name, slug]
+      properties:
+        name:
+          type: string
+          example: Acme Corp
+        slug:
+          type: string
+          example: acme
+          description: Unique URL-safe identifier
+        domain:
+          type: string
+          nullable: true
+          example: acme.yoursaas.com
+        plan:
+          type: string
+          enum: [FREE, PRO, ENTERPRISE]
+          default: FREE
+
+    TenantStats:
+      type: object
+      properties:
+        users:
+          type: object
+          properties:
+            total:
+              type: integer
+            active:
+              type: integer
+            new_this_month:
+              type: integer
+        apiCalls:
+          type: object
+          properties:
+            total:
+              type: integer
+            this_week:
+              type: integer
+        activity:
+          type: object
+          properties:
+            auditEventsThisMonth:
+              type: integer
+        recentAuditLogs:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLog'
+
+    # ── User ──────────────────────────────────────────────────────────
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        keycloak_id:
+          type: string
+        email:
+          type: string
+          format: email
+          example: alice@acme.com
+        first_name:
+          type: string
+          example: Alice
+        last_name:
+          type: string
+          example: Smith
+        role:
+          type: string
+          enum: [SUPER_ADMIN, ADMIN, MANAGER, USER]
+          example: ADMIN
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, SUSPENDED]
+          example: ACTIVE
+        last_login_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    UpdateUserRequest:
+      type: object
+      properties:
+        firstName:
+          type: string
+        lastName:
+          type: string
+        role:
+          type: string
+          enum: [USER, MANAGER, ADMIN]
+        status:
+          type: string
+          enum: [ACTIVE, INACTIVE, SUSPENDED]
+
+    InviteUserRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+          format: email
+          example: bob@acme.com
+        role:
+          type: string
+          enum: [USER, MANAGER, ADMIN]
+          default: USER
+
+    Notification:
+      type: object
+      properties:
+        id:
+          type: string
+        user_id:
+          type: string
+        tenant_id:
+          type: string
+        type:
+          type: string
+          example: INVITATION_ACCEPTED
+        title:
+          type: string
+          example: New member joined
+        message:
+          type: string
+        read:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    # ── Subscription ─────────────────────────────────────────────────
+    Subscription:
+      type: object
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        plan:
+          type: string
+          enum: [FREE, PRO, ENTERPRISE]
+        status:
+          type: string
+          enum: [ACTIVE, PAST_DUE, CANCELED, TRIALING]
+        current_period_start:
+          type: string
+          format: date-time
+          nullable: true
+        current_period_end:
+          type: string
+          format: date-time
+          nullable: true
+        cancel_at_period_end:
+          type: boolean
+        config:
+          type: object
+          properties:
+            maxUsers:
+              type: integer
+            maxApiCalls:
+              type: integer
+            price:
+              type: number
+            features:
+              type: array
+              items:
+                type: string
+
+    PlanConfig:
+      type: object
+      properties:
+        FREE:
+          type: object
+        PRO:
+          type: object
+        ENTERPRISE:
+          type: object
+
+    # ── Feature Flag ─────────────────────────────────────────────────
+    FeatureFlag:
+      type: object
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        key:
+          type: string
+          example: advanced_reports
+        enabled:
+          type: boolean
+          example: true
+        description:
+          type: string
+          nullable: true
+          example: Advanced reporting features
+        config:
+          type: object
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    UpdateFlagRequest:
+      type: object
+      required: [enabled]
+      properties:
+        enabled:
+          type: boolean
+        config:
+          type: object
+          nullable: true
+
+    BulkUpdateFlagsRequest:
+      type: object
+      required: [updates]
+      properties:
+        updates:
+          type: array
+          items:
+            type: object
+            required: [key, enabled]
+            properties:
+              key:
+                type: string
+              enabled:
+                type: boolean
+              config:
+                type: object
+                nullable: true
+
+    # ── Analytics ────────────────────────────────────────────────────
+    DashboardMetrics:
+      type: object
+      properties:
+        users:
+          type: object
+          properties:
+            total:
+              type: integer
+            active:
+              type: integer
+            new_this_month:
+              type: integer
+        apiCalls:
+          type: object
+          properties:
+            total:
+              type: integer
+            this_week:
+              type: integer
+        activity:
+          type: object
+          properties:
+            auditEventsThisMonth:
+              type: integer
+
+    ApiUsagePoint:
+      type: object
+      properties:
+        date:
+          type: string
+          format: date
+          example: '2025-03-01'
+        count:
+          type: integer
+          example: 423
+
+    TopEndpoint:
+      type: object
+      properties:
+        endpoint:
+          type: string
+          example: /api/users
+        method:
+          type: string
+          example: GET
+        count:
+          type: integer
+          example: 1240
+        avg_response_ms:
+          type: integer
+          example: 34
+
+    ActivityItem:
+      type: object
+      properties:
+        action:
+          type: string
+          example: CREATE
+        count:
+          type: integer
+          example: 87
+
+    # ── Audit Log ────────────────────────────────────────────────────
+    AuditLog:
+      type: object
+      properties:
+        id:
+          type: string
+        tenant_id:
+          type: string
+        user_id:
+          type: string
+          nullable: true
+        action:
+          type: string
+          example: CREATE
+        resource:
+          type: string
+          example: user
+        resource_id:
+          type: string
+          nullable: true
+        metadata:
+          type: object
+          nullable: true
+        ip_address:
+          type: string
+          nullable: true
+          example: 127.0.0.1
+        user_agent:
+          type: string
+          nullable: true
+        email:
+          type: string
+          nullable: true
+        first_name:
+          type: string
+          nullable: true
+        last_name:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+# ── Security default ─────────────────────────────────────────────────
+security:
+  - BearerAuth: []
+
+paths:
+  # ── Health ──────────────────────────────────────────────────────────
+  /health:
+    get:
+      tags: [Health]
+      summary: Health check
+      security: []
+      responses:
+        '200':
+          description: API is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  success:
+                    type: boolean
+                    example: true
+                  message:
+                    type: string
+                    example: API is healthy
+                  version:
+                    type: string
+                    example: 1.0.0
+                  timestamp:
+                    type: string
+                    format: date-time
+
+  # ── Auth ────────────────────────────────────────────────────────────
+  /auth/google:
+    get:
+      tags: [Auth]
+      summary: Redirect to Google OAuth via Keycloak
+      security: []
+      responses:
+        '302':
+          description: Redirect to Keycloak login page
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Login with email and password
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email:
+                  type: string
+                  format: email
+                  example: alice@acme.com
+                password:
+                  type: string
+                  format: password
+                  example: secret123
+            example:
+              email: alice@acme.com
+              password: secret123
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          access_token:
+                            type: string
+                          refresh_token:
+                            type: string
+                          expires_in:
+                            type: integer
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiError'
+
+  /auth/callback:
+    get:
+      tags: [Auth]
+      summary: OAuth2 callback — exchange code for tokens
+      security: []
+      parameters:
+        - name: code
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '302':
+          description: Redirect to frontend with tokens
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [refresh_token]
+              properties:
+                refresh_token:
+                  type: string
+      responses:
+        '200':
+          description: New tokens issued
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          access_token:
+                            type: string
+                          refresh_token:
+                            type: string
+        '401':
+          description: Invalid or expired refresh token
+
+  # ── Tenants ─────────────────────────────────────────────────────────
+  /tenants/current:
+    get:
+      tags: [Tenants]
+      summary: Get current tenant (from X-Tenant-Slug)
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      responses:
+        '200':
+          description: Current tenant info
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Tenant'
+        '404':
+          description: Tenant not found
+
+  /tenants/current/stats:
+    get:
+      tags: [Tenants]
+      summary: Get stats for current tenant
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      responses:
+        '200':
+          description: Tenant stats
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TenantStats'
+
+  /tenants:
+    get:
+      tags: [Tenants]
+      summary: List all tenants (SUPER_ADMIN only)
+      parameters:
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, SUSPENDED, DELETED]
+        - name: plan
+          in: query
+          schema:
+            type: string
+            enum: [FREE, PRO, ENTERPRISE]
+      responses:
+        '200':
+          description: Paginated tenant list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Tenant'
+                      meta:
+                        $ref: '#/components/schemas/PaginatedMeta'
+        '403':
+          description: SUPER_ADMIN role required
+
+    post:
+      tags: [Tenants]
+      summary: Create a new tenant (SUPER_ADMIN only)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateTenantRequest'
+            example:
+              name: Acme Corp
+              slug: acme
+              plan: PRO
+      responses:
+        '201':
+          description: Tenant created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Tenant'
+        '409':
+          description: Slug already taken
+
+  /tenants/{id}:
+    get:
+      tags: [Tenants]
+      summary: Get tenant by ID
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Tenant'
+        '404':
+          description: Not found
+
+    put:
+      tags: [Tenants]
+      summary: Update tenant
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                domain:
+                  type: string
+                status:
+                  type: string
+                  enum: [ACTIVE, SUSPENDED]
+      responses:
+        '200':
+          description: Updated tenant
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Tenant'
+
+    delete:
+      tags: [Tenants]
+      summary: Soft-delete tenant (SUPER_ADMIN only)
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccess'
+
+  /tenants/{id}/stats:
+    get:
+      tags: [Tenants]
+      summary: Get stats for a specific tenant
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Tenant stats
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/TenantStats'
+
+  # ── Users ───────────────────────────────────────────────────────────
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Get current authenticated user
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+
+  /users/me/notifications:
+    get:
+      tags: [Users]
+      summary: Get notifications for current user
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      responses:
+        '200':
+          description: Notification list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/Notification'
+
+  /users/notifications/{id}/read:
+    put:
+      tags: [Users]
+      summary: Mark a notification as read
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Marked as read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccess'
+
+  /users/invite:
+    post:
+      tags: [Users]
+      summary: Invite a user to the tenant (sends email)
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InviteUserRequest'
+            example:
+              email: bob@acme.com
+              role: MANAGER
+      responses:
+        '201':
+          description: Invitation sent
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          id:
+                            type: string
+                          email:
+                            type: string
+        '403':
+          description: User limit reached for current plan
+        '409':
+          description: User already exists in tenant
+
+  /users/accept-invite/{token}:
+    post:
+      tags: [Users]
+      summary: Accept an invitation via token
+      parameters:
+        - name: token
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Invitation accepted, user created
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid, expired, or already used token
+
+  /users:
+    get:
+      tags: [Users]
+      summary: List users in the current tenant
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: role
+          in: query
+          schema:
+            type: string
+            enum: [USER, MANAGER, ADMIN, SUPER_ADMIN]
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [ACTIVE, INACTIVE, SUSPENDED]
+      responses:
+        '200':
+          description: Paginated user list
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/User'
+                      meta:
+                        $ref: '#/components/schemas/PaginatedMeta'
+
+  /users/{id}:
+    get:
+      tags: [Users]
+      summary: Get user by ID
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User details
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+
+    put:
+      tags: [Users]
+      summary: Update user (role, status, name)
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateUserRequest'
+      responses:
+        '200':
+          description: Updated user
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+
+    delete:
+      tags: [Users]
+      summary: Deactivate a user (soft delete)
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: User deactivated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiSuccess'
+        '400':
+          description: Cannot deactivate own account
+
+  # ── Subscriptions ────────────────────────────────────────────────────
+  /subscriptions/plans:
+    get:
+      tags: [Subscriptions]
+      summary: Get all available plans and their features
+      security: []
+      responses:
+        '200':
+          description: Plan configuration
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/PlanConfig'
+              example:
+                success: true
+                message: Success
+                data:
+                  FREE:
+                    maxUsers: 5
+                    maxApiCalls: 1000
+                    price: 0
+                    features: [analytics, audit_logs, email_notifications, api_access]
+                  PRO:
+                    maxUsers: 50
+                    maxApiCalls: 50000
+                    price: 49
+                    features: [analytics, audit_logs, advanced_reports, ai_assistant]
+                  ENTERPRISE:
+                    maxUsers: 999999
+                    maxApiCalls: 999999
+                    price: 199
+                    features: [analytics, audit_logs, advanced_reports, custom_roles, sso, ai_assistant]
+
+  /subscriptions:
+    get:
+      tags: [Subscriptions]
+      summary: Get current tenant subscription
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      responses:
+        '200':
+          description: Subscription details with plan config
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Subscription'
+
+  /subscriptions/upgrade:
+    post:
+      tags: [Subscriptions]
+      summary: Upgrade or change subscription plan
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan]
+              properties:
+                plan:
+                  type: string
+                  enum: [FREE, PRO, ENTERPRISE]
+            example:
+              plan: PRO
+      responses:
+        '200':
+          description: Plan changed, feature flags updated automatically
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Subscription'
+        '400':
+          description: Invalid plan
+
+  # ── Feature Flags ─────────────────────────────────────────────────────
+  /feature-flags:
+    get:
+      tags: [Feature Flags]
+      summary: Get all feature flags for the current tenant
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      responses:
+        '200':
+          description: Feature flag list (cached in Redis for 5 minutes)
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/FeatureFlag'
+
+  /feature-flags/{key}:
+    put:
+      tags: [Feature Flags]
+      summary: Enable or disable a feature flag
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - name: key
+          in: path
+          required: true
+          schema:
+            type: string
+          example: advanced_reports
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateFlagRequest'
+            example:
+              enabled: true
+      responses:
+        '200':
+          description: Flag updated and cache invalidated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/FeatureFlag'
+
+  /feature-flags/bulk:
+    post:
+      tags: [Feature Flags]
+      summary: Bulk update multiple flags at once
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BulkUpdateFlagsRequest'
+            example:
+              updates:
+                - key: advanced_reports
+                  enabled: true
+                - key: ai_assistant
+                  enabled: false
+      responses:
+        '200':
+          description: All flags updated
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/FeatureFlag'
+
+  # ── Analytics ─────────────────────────────────────────────────────────
+  /analytics/dashboard:
+    get:
+      tags: [Analytics]
+      summary: Get dashboard KPI metrics (cached 60s)
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+      responses:
+        '200':
+          description: Dashboard metrics
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/DashboardMetrics'
+              example:
+                success: true
+                message: Success
+                data:
+                  users:
+                    total: 23
+                    active: 20
+                    new_this_month: 5
+                  apiCalls:
+                    total: 18420
+                    this_week: 3210
+                  activity:
+                    auditEventsThisMonth: 147
+
+  /analytics/api-usage:
+    get:
+      tags: [Analytics]
+      summary: API call counts grouped by day
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 30
+            minimum: 1
+            maximum: 365
+          description: Number of days to look back
+      responses:
+        '200':
+          description: Daily API usage series
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ApiUsagePoint'
+
+  /analytics/top-endpoints:
+    get:
+      tags: [Analytics]
+      summary: Most-called API endpoints with average response times
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+            maximum: 50
+      responses:
+        '200':
+          description: Top endpoint stats
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/TopEndpoint'
+
+  /analytics/user-activity:
+    get:
+      tags: [Analytics]
+      summary: User activity breakdown by action type
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - name: days
+          in: query
+          schema:
+            type: integer
+            default: 30
+      responses:
+        '200':
+          description: Activity breakdown
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/ActivityItem'
+
+  # ── Audit Logs ────────────────────────────────────────────────────────
+  /audit-logs:
+    get:
+      tags: [Audit Logs]
+      summary: Query the immutable audit trail (MANAGER+ only)
+      parameters:
+        - $ref: '#/components/parameters/TenantSlug'
+        - $ref: '#/components/parameters/PageParam'
+        - $ref: '#/components/parameters/LimitParam'
+        - name: userId
+          in: query
+          schema:
+            type: string
+          description: Filter by user ID
+        - name: action
+          in: query
+          schema:
+            type: string
+          description: Filter by action (partial match, case-insensitive)
+          example: CREATE
+        - name: resource
+          in: query
+          schema:
+            type: string
+            enum: [tenant, user, feature_flag, subscription]
+          description: Filter by resource type
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: Start of date range (ISO 8601)
+          example: '2025-01-01T00:00:00Z'
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+          description: End of date range (ISO 8601)
+          example: '2025-12-31T23:59:59Z'
+      responses:
+        '200':
+          description: Paginated audit log entries
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/ApiSuccess'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items:
+                          $ref: '#/components/schemas/AuditLog'
+                      meta:
+                        $ref: '#/components/schemas/PaginatedMeta'
